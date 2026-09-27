@@ -1,9 +1,11 @@
+const svgNS = "http://www.w3.org/2000/svg";
+
 export function createDashboardView({
   providers,
   profiles,
   stats,
   events,
-  getDecision,
+  getRouting,
   getRecoveryCandidate,
   getMarketContext,
   getCommitmentStatus,
@@ -13,7 +15,7 @@ export function createDashboardView({
     renderMetrics();
     renderProviders();
     renderEvents();
-    renderDecision();
+    renderRouting();
   }
 
   function renderMetrics() {
@@ -134,15 +136,15 @@ export function createDashboardView({
     }
   }
 
-  function renderDecision() {
-    const decision = getDecision();
+  function renderRouting() {
+    const routing = getRouting();
     document.getElementById("swarmProfileName").textContent =
-      decision.profileName.toUpperCase();
-    document.getElementById("transactionProfile").value = decision.profileId;
+      routing.profileName.toUpperCase();
+    document.getElementById("transactionProfile").value = routing.profileId;
     const market = getMarketContext();
     document.getElementById("merchantCountry").value = market.countryId;
     document.getElementById("settlementCurrency").value = market.currencyId;
-    const allocation = decision.shares
+    const allocation = routing.shares
       .map(
         (share, index) =>
           `${providers[index].shortName} ${Math.round(share * 100)}%`,
@@ -150,14 +152,15 @@ export function createDashboardView({
       .join(" / ");
     const recoveryCandidate = getRecoveryCandidate();
     document.getElementById("routeDecision").textContent =
-      `PSO mix: ${allocation}`;
+      `Trail mix: ${allocation}`;
     const nextAction = recoveryCandidate
       ? `Next payment probes ${recoveryCandidate.name}.`
-      : "Next payment follows the PSO mix.";
+      : "Next payment follows the strongest trails.";
     document.getElementById("decisionDetail").textContent =
-      `PSO utility ${decision.fitness.toFixed(2)} · ${decision.profileName} · ${market.countryId}/${market.currencyId} · ${allocation}. ${nextAction}`;
+      `${routing.profileName} · ${market.countryId}/${market.currencyId} · ${allocation}. ${nextAction}`;
     renderNaiveComparison();
-    renderSwarmParticles(decision.particles, decision.shares);
+    renderRoutePheromones(routing.shares);
+    renderPheromoneChart(routing.pheromones, routing.shares);
   }
 
   function renderNaiveComparison() {
@@ -170,57 +173,22 @@ export function createDashboardView({
     naiveEl.classList.toggle("is-broken", !isEligibleHere);
   }
 
-  function renderSwarmParticles(particles, shares) {
-    const group = document.getElementById("swarmParticles");
-    if (!group) return;
-
-    while (group.children.length < particles.length) {
-      const particle = document.createElementNS(
-        "http://www.w3.org/2000/svg",
-        "circle",
-      );
-      particle.classList.add("swarm-particle");
-      particle.setAttribute("r", "3.5");
-      group.append(particle);
-    }
-
-    const routePoints = providers.map((provider) => {
+  function renderRoutePheromones(shares) {
+    providers.forEach((provider, index) => {
       const path = document.getElementById(`route-${provider.id}`);
-      return path.getPointAtLength(path.getTotalLength() * 0.62);
+      if (!path) return;
+      const strength = shares[index];
+      path.style.strokeWidth = `${(1.5 + strength * 7).toFixed(2)}px`;
+      path.style.opacity = `${(0.35 + strength * 0.65).toFixed(2)}`;
     });
-
-    particles.forEach((particle, index) => {
-      const dot = group.children[index];
-      const x = particle.position.reduce(
-        (total, share, providerIndex) =>
-          total + routePoints[providerIndex].x * share,
-        0,
-      );
-      const y = particle.position.reduce(
-        (total, share, providerIndex) =>
-          total + routePoints[providerIndex].y * share,
-        0,
-      );
-      dot.setAttribute("cx", x);
-      dot.setAttribute("cy", y);
-      const isLeader = particle.position.every(
-        (share, providerIndex) =>
-          Math.abs(share - shares[providerIndex]) < 0.025,
-      );
-      dot.classList.toggle("is-leader", isLeader);
-      dot.setAttribute("r", isLeader ? "4.5" : "3.5");
-    });
-
-    renderSwarmChart(particles, shares);
   }
 
-  const SWARM_CHART_AXIS_LEFT = 96;
-  const SWARM_CHART_AXIS_RIGHT = 460;
-  const SWARM_CHART_ROW_HEIGHT = 46;
-  const SWARM_CHART_FIRST_ROW_Y = 34;
-  const svgNS = "http://www.w3.org/2000/svg";
+  const PHEROMONE_CHART_AXIS_LEFT = 96;
+  const PHEROMONE_CHART_AXIS_RIGHT = 460;
+  const PHEROMONE_CHART_ROW_HEIGHT = 46;
+  const PHEROMONE_CHART_FIRST_ROW_Y = 34;
 
-  function renderSwarmChart(particles, shares) {
+  function renderPheromoneChart(pheromones, shares) {
     document.getElementById("swarmAllocation").textContent = shares
       .map(
         (share, index) =>
@@ -228,19 +196,25 @@ export function createDashboardView({
       )
       .join(" / ");
 
-    const container = document.getElementById("swarmChartRows");
+    const container = document.getElementById("pheromoneChartRows");
     if (!container) return;
-    const axisSpan = SWARM_CHART_AXIS_RIGHT - SWARM_CHART_AXIS_LEFT;
+    const axisSpan = PHEROMONE_CHART_AXIS_RIGHT - PHEROMONE_CHART_AXIS_LEFT;
+    const maxPheromone = Math.max(1, ...pheromones);
 
     while (container.children.length < providers.length) {
       const row = document.createElementNS(svgNS, "g");
-      row.classList.add("swarm-chart-row");
+      row.classList.add("pheromone-row");
 
-      const axis = document.createElementNS(svgNS, "line");
-      axis.classList.add("swarm-row-axis");
-      axis.setAttribute("x1", SWARM_CHART_AXIS_LEFT);
-      axis.setAttribute("x2", SWARM_CHART_AXIS_RIGHT);
-      row.append(axis);
+      const track = document.createElementNS(svgNS, "line");
+      track.classList.add("pheromone-row-track");
+      track.setAttribute("x1", PHEROMONE_CHART_AXIS_LEFT);
+      track.setAttribute("x2", PHEROMONE_CHART_AXIS_RIGHT);
+      row.append(track);
+
+      const bar = document.createElementNS(svgNS, "line");
+      bar.classList.add("pheromone-row-bar");
+      bar.setAttribute("x1", PHEROMONE_CHART_AXIS_LEFT);
+      row.append(bar);
 
       const label = document.createElementNS(svgNS, "text");
       label.classList.add("swarm-row-label");
@@ -249,30 +223,29 @@ export function createDashboardView({
 
       const readout = document.createElementNS(svgNS, "text");
       readout.classList.add("swarm-row-readout");
-      readout.setAttribute("x", SWARM_CHART_AXIS_RIGHT + 14);
+      readout.setAttribute("x", PHEROMONE_CHART_AXIS_RIGHT + 14);
       row.append(readout);
-
-      const dots = document.createElementNS(svgNS, "g");
-      dots.classList.add("swarm-row-dots");
-      row.append(dots);
-
-      const target = document.createElementNS(svgNS, "circle");
-      target.classList.add("swarm-target");
-      target.setAttribute("r", "8");
-      row.append(target);
 
       container.append(row);
     }
 
     providers.forEach((provider, providerIndex) => {
       const rowY =
-        SWARM_CHART_FIRST_ROW_Y + providerIndex * SWARM_CHART_ROW_HEIGHT;
+        PHEROMONE_CHART_FIRST_ROW_Y + providerIndex * PHEROMONE_CHART_ROW_HEIGHT;
       const row = container.children[providerIndex];
       const share = shares[providerIndex];
+      const pheromoneWidth =
+        (pheromones[providerIndex] / maxPheromone) * axisSpan;
 
-      const axis = row.querySelector(".swarm-row-axis");
-      axis.setAttribute("y1", rowY);
-      axis.setAttribute("y2", rowY);
+      const track = row.querySelector(".pheromone-row-track");
+      track.setAttribute("y1", rowY);
+      track.setAttribute("y2", rowY);
+
+      const bar = row.querySelector(".pheromone-row-bar");
+      bar.setAttribute("y1", rowY);
+      bar.setAttribute("y2", rowY);
+      bar.setAttribute("x2", PHEROMONE_CHART_AXIS_LEFT + pheromoneWidth);
+      bar.classList.toggle("is-leader", share === Math.max(...shares));
 
       const label = row.querySelector(".swarm-row-label");
       label.setAttribute("y", rowY + 4);
@@ -281,70 +254,33 @@ export function createDashboardView({
       const readout = row.querySelector(".swarm-row-readout");
       readout.setAttribute("y", rowY + 4);
       readout.textContent = `${Math.round(share * 100)}%`;
-
-      const target = row.querySelector(".swarm-target");
-      target.setAttribute("cx", SWARM_CHART_AXIS_LEFT + share * axisSpan);
-      target.setAttribute("cy", rowY);
-
-      const dots = row.querySelector(".swarm-row-dots");
-      while (dots.children.length < particles.length) {
-        const dot = document.createElementNS(svgNS, "circle");
-        dot.classList.add("swarm-chart-particle");
-        dot.setAttribute("r", "3.5");
-        dots.append(dot);
-      }
-
-      particles.forEach((particle, particleIndex) => {
-        const dot = dots.children[particleIndex];
-        const particleShare = particle.position[providerIndex];
-        const jitter = ((particleIndex % 7) - 3) * 2.6;
-        dot.setAttribute(
-          "cx",
-          SWARM_CHART_AXIS_LEFT + particleShare * axisSpan,
-        );
-        dot.setAttribute("cy", rowY + jitter);
-        dot.classList.toggle(
-          "is-leader",
-          particle.position.every(
-            (particleProviderShare, otherIndex) =>
-              Math.abs(particleProviderShare - shares[otherIndex]) < 0.025,
-          ),
-        );
-      });
     });
   }
 
   function renderBenchmark(result) {
-    renderPolicyResult("baseline", result.baseline);
-    renderPolicyResult("greedy", result.greedy);
-    renderPolicyResult("pso", result.pso);
-    const utilityDelta = result.pso.utility - result.greedy.utility;
+    renderPolicyResult("naive", result.naive);
+    renderPolicyResult("bandit", result.bandit);
+    renderPolicyResult("ants", result.ants);
+    const utilityDelta = result.ants.utility - result.bandit.utility;
     const approvalDelta =
-      (result.pso.approvalRate - result.greedy.approvalRate) * 100;
-    const evaluationRatio =
-      result.pso.fitnessEvaluations / result.greedy.fitnessEvaluations;
+      (result.ants.approvalRate - result.bandit.approvalRate) * 100;
     const summary = document.getElementById("benchmarkSummary");
     summary.classList.toggle("is-better", utilityDelta > 0);
     summary.classList.toggle("is-worse", utilityDelta < 0);
     const meanResult =
       Math.abs(utilityDelta) < 0.0005
-        ? "mean utility was effectively tied with greedy"
-        : `${utilityDelta > 0 ? "mean utility exceeded" : "mean utility trailed"} greedy by ${Math.abs(utilityDelta).toFixed(5)} per request`;
-    summary.textContent = `Across ${result.scenarioCount} paired scenarios (${result.requestCount.toLocaleString()} requests per policy), PSO ${meanResult}, won ${result.psoWinsGreedy}/${result.scenarioCount} individual scenarios, and used ${evaluationRatio.toFixed(0)}x as many fitness evaluations. Approval delta versus greedy: ${approvalDelta >= 0 ? "+" : ""}${approvalDelta.toFixed(2)} points.`;
+        ? "mean utility was effectively tied with the bandit"
+        : `${utilityDelta > 0 ? "mean utility exceeded" : "mean utility trailed"} the bandit by ${Math.abs(utilityDelta).toFixed(5)} per request`;
+    summary.textContent = `Across ${result.scenarioCount} paired scenarios (${result.requestCount.toLocaleString()} requests per policy, all three learning online from the same simulated traffic), the ant colony ${meanResult}, and beat it in ${result.antWinsBandit}/${result.scenarioCount} scenarios. Versus the naive static rule: won ${result.antWinsNaive}/${result.scenarioCount} scenarios. Approval delta versus the bandit: ${approvalDelta >= 0 ? "+" : ""}${approvalDelta.toFixed(2)} points.`;
   }
 
   function renderPolicyResult(prefix, result) {
     document.getElementById(`${prefix}Mix`).textContent = result.shares
-      .map((allocation, profileIndex) => {
-        const split = allocation
-          .map(
-            (share, providerIndex) =>
-              `${providers[providerIndex].shortName} ${Math.round(share * 100)}%`,
-          )
-          .join(" / ");
-        return `${profiles[profileIndex].shortName}: ${split}`;
-      })
-      .join(" · ");
+      .map(
+        (share, providerIndex) =>
+          `${providers[providerIndex].shortName} ${Math.round(share * 100)}%`,
+      )
+      .join(" / ");
     document.getElementById(`${prefix}Approval`).textContent =
       `${(result.approvalRate * 100).toFixed(1)}%`;
     document.getElementById(`${prefix}Latency`).textContent =
@@ -353,9 +289,6 @@ export function createDashboardView({
       `${result.meanFeeBps.toFixed(0)} bps`;
     document.getElementById(`${prefix}Utility`).textContent =
       result.utility.toFixed(5);
-    document.getElementById(`${prefix}Evaluations`).textContent = Math.round(
-      result.fitnessEvaluations,
-    ).toLocaleString();
   }
 
   function setMessage(message, kind = "success") {
@@ -440,7 +373,7 @@ export function createDashboardView({
     animatePacket,
     clearRouteAnimation,
     render,
-    renderDecision,
+    renderRouting,
     renderBenchmark,
     setBusy,
     setMessage,

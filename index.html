@@ -118,9 +118,10 @@
               >
                 <title id="mapTitle">PCI payment route map</title>
                 <desc id="mapDescription">
-                  Payments enter through the gateway. Particle swarm
-                  candidates allocate traffic across five acquirers: Adyen,
-                  Chase EU, Worldpay EU, Stripe, and Braintree.
+                  Payments enter through the gateway. Each attempt is one
+                  ant's trip, routed by pheromone trail strength across five
+                  acquirers: Adyen, Chase EU, Worldpay EU, Stripe, and
+                  Braintree.
                 </desc>
                 <path
                   class="route-line"
@@ -147,7 +148,6 @@
                   id="route-braintree"
                   d="M 232 292 C 365 292, 398 528, 535 528"
                 ></path>
-                <g id="swarmParticles" aria-hidden="true"></g>
                 <g class="map-node gateway-node">
                   <rect x="42" y="250" width="190" height="84" rx="5"></rect>
                   <circle cx="68" cy="292" r="7"></circle>
@@ -268,9 +268,12 @@
                 ><span
                   ><i class="legend-line legend-active"></i> Payment in
                   flight</span
-                ><span><i class="legend-particle"></i> PSO particles</span>
+                ><span
+                  ><i class="legend-line legend-trail"></i> Strong
+                  trail</span
+                >
               </div>
-              <span id="routeDecision">PSO split pending</span>
+              <span id="routeDecision">Trail mix pending</span>
             </div>
           </section>
 
@@ -278,11 +281,14 @@
             <div class="panel-heading">
               <div>
                 <p class="eyebrow">
-                  POLICY SEARCH · <span id="swarmProfileName">STANDARD</span>
+                  PHEROMONE TRAILS ·
+                  <span id="swarmProfileName">STANDARD</span>
                 </p>
-                <h2 id="swarmTitle">Particle population</h2>
+                <h2 id="swarmTitle">What the colony has learned</h2>
               </div>
-              <span class="swarm-allocation" id="swarmAllocation">PSO MIX</span>
+              <span class="swarm-allocation" id="swarmAllocation"
+                >TRAIL MIX</span
+              >
             </div>
             <div class="swarm-chart-wrap">
               <svg
@@ -291,26 +297,25 @@
                 role="img"
                 aria-labelledby="swarmChartTitle swarmChartDescription"
               >
-                <title id="swarmChartTitle">Particle swarm policy search</title>
+                <title id="swarmChartTitle">Provider pheromone trails</title>
                 <desc id="swarmChartDescription">
-                  One row per provider. Each dot is a candidate policy's
-                  traffic share for that provider; the outlined marker shows
-                  the share the swarm has settled on.
+                  One row per provider. The bar shows accumulated pheromone
+                  strength — reinforced by real successful payments, fading
+                  by evaporation when a route stops paying off.
                 </desc>
-                <g id="swarmChartRows"></g>
+                <g id="pheromoneChartRows"></g>
                 <text
                   class="swarm-axis-title"
                   x="270"
                   y="268"
                   text-anchor="middle"
                 >
-                  TRAFFIC SHARE PER PROVIDER
+                  PHEROMONE STRENGTH PER PROVIDER
                 </text>
               </svg>
             </div>
             <div class="swarm-legend">
-              <span><i class="legend-particle"></i> Candidate policy</span
-              ><span><i class="legend-optimum"></i> Best found</span>
+              <span><i class="legend-optimum"></i> Trail strength</span>
             </div>
           </section>
 
@@ -320,8 +325,8 @@
           >
             <div class="panel-heading">
               <div>
-                <p class="eyebrow">SYNTHETIC LOAD TEST</p>
-                <h2 id="benchmarkTitle">PSO vs single-provider rule</h2>
+                <p class="eyebrow">ONLINE LEARNING, SAME TRAFFIC</p>
+                <h2 id="benchmarkTitle">Ant colony vs. bandit vs. naive rule</h2>
               </div>
               <button
                 class="button button-primary"
@@ -333,87 +338,75 @@
             </div>
             <p class="benchmark-note">
               The workload is 55% Standard, 25% Priority, and 20% Fee-sensitive.
-              Each gets its own allocation but shares provider capacity. Ten
-              paired seeds use 1,200 requests each; greedy moves 1% between
-              providers by marginal utility, while the single-provider rule
-              sends everything to the best provider at full load.
+              Ten paired seeds run 1,200 simulated payments each through three
+              policies that never see the closed-form model — only the
+              realized outcome of each payment: a naive rule that never
+              adapts, an epsilon-greedy bandit, and the ant colony.
             </p>
             <div class="benchmark-results">
               <div class="benchmark-column">
-                <p class="eyebrow">BEST SINGLE-PROVIDER IF/ELSE</p>
-                <strong class="benchmark-mix" id="baselineMix">Not run</strong>
+                <p class="eyebrow">NAIVE SINGLE-PROVIDER RULE</p>
+                <strong class="benchmark-mix" id="naiveMix">Not run</strong>
                 <dl class="benchmark-metrics">
                   <div>
                     <dt>FIRST-ATTEMPT APPROVALS</dt>
-                    <dd id="baselineApproval">--</dd>
+                    <dd id="naiveApproval">--</dd>
                   </div>
                   <div>
                     <dt>MEAN LATENCY</dt>
-                    <dd id="baselineLatency">--</dd>
+                    <dd id="naiveLatency">--</dd>
                   </div>
                   <div>
                     <dt>MEAN FEE</dt>
-                    <dd id="baselineFee">--</dd>
+                    <dd id="naiveFee">--</dd>
                   </div>
                   <div>
                     <dt>UTILITY / REQUEST</dt>
-                    <dd id="baselineUtility">--</dd>
-                  </div>
-                  <div>
-                    <dt>FITNESS EVALUATIONS</dt>
-                    <dd id="baselineEvaluations">--</dd>
+                    <dd id="naiveUtility">--</dd>
                   </div>
                 </dl>
               </div>
               <div class="benchmark-column benchmark-greedy">
-                <p class="eyebrow">CAPACITY-AWARE IF/THEN</p>
-                <strong class="benchmark-mix" id="greedyMix">Not run</strong>
+                <p class="eyebrow">EPSILON-GREEDY BANDIT</p>
+                <strong class="benchmark-mix" id="banditMix">Not run</strong>
                 <dl class="benchmark-metrics">
                   <div>
                     <dt>FIRST-ATTEMPT APPROVALS</dt>
-                    <dd id="greedyApproval">--</dd>
+                    <dd id="banditApproval">--</dd>
                   </div>
                   <div>
                     <dt>MEAN LATENCY</dt>
-                    <dd id="greedyLatency">--</dd>
+                    <dd id="banditLatency">--</dd>
                   </div>
                   <div>
                     <dt>MEAN FEE</dt>
-                    <dd id="greedyFee">--</dd>
+                    <dd id="banditFee">--</dd>
                   </div>
                   <div>
                     <dt>UTILITY / REQUEST</dt>
-                    <dd id="greedyUtility">--</dd>
-                  </div>
-                  <div>
-                    <dt>FITNESS EVALUATIONS</dt>
-                    <dd id="greedyEvaluations">--</dd>
+                    <dd id="banditUtility">--</dd>
                   </div>
                 </dl>
               </div>
-              <div class="benchmark-column benchmark-pso">
-                <p class="eyebrow">PARTICLE SWARM</p>
-                <strong class="benchmark-mix" id="psoMix">Not run</strong>
+              <div class="benchmark-column benchmark-ants">
+                <p class="eyebrow">ANT COLONY</p>
+                <strong class="benchmark-mix" id="antsMix">Not run</strong>
                 <dl class="benchmark-metrics">
                   <div>
                     <dt>FIRST-ATTEMPT APPROVALS</dt>
-                    <dd id="psoApproval">--</dd>
+                    <dd id="antsApproval">--</dd>
                   </div>
                   <div>
                     <dt>MEAN LATENCY</dt>
-                    <dd id="psoLatency">--</dd>
+                    <dd id="antsLatency">--</dd>
                   </div>
                   <div>
                     <dt>MEAN FEE</dt>
-                    <dd id="psoFee">--</dd>
+                    <dd id="antsFee">--</dd>
                   </div>
                   <div>
                     <dt>UTILITY / REQUEST</dt>
-                    <dd id="psoUtility">--</dd>
-                  </div>
-                  <div>
-                    <dt>FITNESS EVALUATIONS</dt>
-                    <dd id="psoEvaluations">--</dd>
+                    <dd id="antsUtility">--</dd>
                   </div>
                 </dl>
               </div>
@@ -421,196 +414,6 @@
             <p class="benchmark-summary" id="benchmarkSummary" role="status">
               Not benchmarked yet
             </p>
-          </section>
-
-          <section class="panel stress-panel" aria-labelledby="stressTitle">
-            <div class="panel-heading">
-              <div>
-                <p class="eyebrow">WHERE DOES A SWARM ACTUALLY WIN?</p>
-                <h2 id="stressTitle">Algorithm stress tests</h2>
-              </div>
-            </div>
-            <p class="benchmark-note">
-              The load test above rewards pure exploitation on a smooth,
-              low-dimensional landscape — exactly where a direct search wins.
-              These two tests change the landscape's shape instead of just
-              re-running the same one: one adds a reward you can only reach by
-              passing through a worse patch first, the other scales up the
-              number of routing choices.
-            </p>
-
-            <div class="stress-test">
-              <div class="stress-test-heading">
-                <div>
-                  <p class="eyebrow">TEST 1 · MULTI-MODAL LANDSCAPE</p>
-                  <h3>Volume-discount cliff</h3>
-                </div>
-                <button
-                  class="button button-primary"
-                  id="runLandscapeTest"
-                  type="button"
-                >
-                  Run test
-                </button>
-              </div>
-              <p class="benchmark-note">
-                One provider offers a volume rebate once it carries at least
-                55% of traffic. Reaching that share means passing through
-                allocations that are worse than staying put, so a local
-                optimum sits between the start and the reward. 30 random
-                provider setups, each scored against a fine grid-search
-                optimum.
-              </p>
-              <div class="benchmark-results stress-results">
-                <div class="benchmark-column">
-                  <p class="eyebrow">GREEDY (1% MOVES)</p>
-                  <dl class="benchmark-metrics">
-                    <div>
-                      <dt>FOUND THE REBATE WHEN IT MATTERED</dt>
-                      <dd id="landscapeGreedyHitRate">--</dd>
-                    </div>
-                    <div>
-                      <dt>MEAN GAP TO OPTIMUM</dt>
-                      <dd id="landscapeGreedyGap">--</dd>
-                    </div>
-                    <div>
-                      <dt>MEAN FITNESS EVALUATIONS</dt>
-                      <dd id="landscapeGreedyEvaluations">--</dd>
-                    </div>
-                  </dl>
-                </div>
-                <div class="benchmark-column benchmark-pso">
-                  <p class="eyebrow">PARTICLE SWARM</p>
-                  <dl class="benchmark-metrics">
-                    <div>
-                      <dt>FOUND THE REBATE WHEN IT MATTERED</dt>
-                      <dd id="landscapePsoHitRate">--</dd>
-                    </div>
-                    <div>
-                      <dt>MEAN GAP TO OPTIMUM</dt>
-                      <dd id="landscapePsoGap">--</dd>
-                    </div>
-                    <div>
-                      <dt>MEAN FITNESS EVALUATIONS</dt>
-                      <dd id="landscapePsoEvaluations">--</dd>
-                    </div>
-                  </dl>
-                </div>
-              </div>
-              <p class="benchmark-summary" id="landscapeSummary" role="status">
-                Not run yet
-              </p>
-            </div>
-
-            <div class="stress-test">
-              <div class="stress-test-heading">
-                <div>
-                  <p class="eyebrow">TEST 2 · DIMENSIONAL SCALING</p>
-                  <h3>More routing choices</h3>
-                </div>
-                <button
-                  class="button button-primary"
-                  id="runScalingTest"
-                  type="button"
-                >
-                  Run test
-                </button>
-              </div>
-              <p class="benchmark-note">
-                Same style of smooth landscape as the load test above, but
-                with 3 to 25 synthetic providers instead of 3. Greedy
-                re-checks every from/to provider pair on each move; the
-                swarm's cost per iteration is set by its fixed particle
-                count, not by the number of providers.
-              </p>
-              <div class="scaling-table-wrap">
-                <table class="scaling-table" id="scalingTable">
-                  <thead>
-                    <tr>
-                      <th>PROVIDERS</th>
-                      <th>GREEDY EVALS</th>
-                      <th>PSO EVALS</th>
-                      <th>GREEDY UTILITY</th>
-                      <th>PSO UTILITY</th>
-                      <th>GREEDY TIME</th>
-                      <th>PSO TIME</th>
-                    </tr>
-                  </thead>
-                  <tbody id="scalingTableBody">
-                    <tr>
-                      <td colspan="7" class="scaling-empty">Not run yet</td>
-                    </tr>
-                  </tbody>
-                </table>
-              </div>
-              <p class="benchmark-summary" id="scalingSummary" role="status"></p>
-            </div>
-
-            <div class="stress-test">
-              <div class="stress-test-heading">
-                <div>
-                  <p class="eyebrow">TEST 3 · NOISY EVALUATIONS</p>
-                  <h3>Sampled instead of exact fitness</h3>
-                </div>
-                <button
-                  class="button button-primary"
-                  id="runNoiseTest"
-                  type="button"
-                >
-                  Run test
-                </button>
-              </div>
-              <p class="benchmark-note">
-                Real traffic doesn't hand you a closed-form expected utility —
-                it hands you the realized outcome of however many
-                transactions you've actually routed so far. Here each fitness
-                call only sees 15 simulated transactions instead of the exact
-                expectation. Greedy commits to a move the moment one noisy
-                comparison looks best and never revisits it; the swarm keeps
-                re-sampling across many particles every iteration. 40 random
-                provider setups, each scored against the true (noise-free)
-                optimum.
-              </p>
-              <div class="benchmark-results stress-results">
-                <div class="benchmark-column">
-                  <p class="eyebrow">GREEDY (1% MOVES)</p>
-                  <dl class="benchmark-metrics">
-                    <div>
-                      <dt>MEAN GAP TO TRUE OPTIMUM</dt>
-                      <dd id="noiseGreedyMeanGap">--</dd>
-                    </div>
-                    <div>
-                      <dt>GAP STD. DEVIATION</dt>
-                      <dd id="noiseGreedyStddev">--</dd>
-                    </div>
-                    <div>
-                      <dt>WORST-CASE GAP</dt>
-                      <dd id="noiseGreedyWorst">--</dd>
-                    </div>
-                  </dl>
-                </div>
-                <div class="benchmark-column benchmark-pso">
-                  <p class="eyebrow">PARTICLE SWARM</p>
-                  <dl class="benchmark-metrics">
-                    <div>
-                      <dt>MEAN GAP TO TRUE OPTIMUM</dt>
-                      <dd id="noisePsoMeanGap">--</dd>
-                    </div>
-                    <div>
-                      <dt>GAP STD. DEVIATION</dt>
-                      <dd id="noisePsoStddev">--</dd>
-                    </div>
-                    <div>
-                      <dt>WORST-CASE GAP</dt>
-                      <dd id="noisePsoWorst">--</dd>
-                    </div>
-                  </dl>
-                </div>
-              </div>
-              <p class="benchmark-summary" id="noiseSummary" role="status">
-                Not run yet
-              </p>
-            </div>
           </section>
 
           <section class="panel activity-panel" aria-labelledby="activityTitle">

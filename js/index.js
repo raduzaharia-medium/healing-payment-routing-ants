@@ -1,14 +1,4 @@
 import { createPaymentFlow } from "./payment-flow.js";
-import {
-  runLandscapeBenchmark,
-  runScalingBenchmark,
-  runNoiseBenchmark,
-} from "./stress-benchmarks.js";
-import {
-  renderLandscapeBenchmark,
-  renderScalingBenchmark,
-  renderNoiseBenchmark,
-} from "./stress-benchmark-view.js";
 
 const payments = createPaymentFlow();
 const sendButton = document.getElementById("sendPayment");
@@ -33,23 +23,6 @@ resetButton.addEventListener("click", () => {
 document
   .getElementById("runBenchmark")
   .addEventListener("click", () => payments.runBenchmark());
-
-function runStressTest(buttonId, run, render) {
-  const button = document.getElementById(buttonId);
-  button.addEventListener("click", () => {
-    button.disabled = true;
-    button.textContent = "Running…";
-    window.setTimeout(() => {
-      render(run());
-      button.disabled = false;
-      button.textContent = "Run test";
-    }, 20);
-  });
-}
-
-runStressTest("runLandscapeTest", runLandscapeBenchmark, renderLandscapeBenchmark);
-runStressTest("runScalingTest", runScalingBenchmark, renderScalingBenchmark);
-runStressTest("runNoiseTest", runNoiseBenchmark, renderNoiseBenchmark);
 
 const sideColumn = document.querySelector(".side-column");
 

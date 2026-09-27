@@ -1,10 +1,12 @@
-import { ProviderRoutingSwarm } from "./particle-swarm.js";
+import { ProviderPheromoneColony } from "./ant-colony.js";
 import { createDashboardView } from "./rendering.js";
 
 const MAX_PAYMENT_ATTEMPTS = 5;
-const SWARM_ANIMATION_FRAMES = 18;
 const BENCHMARK_REQUESTS = 1200;
 const BENCHMARK_SCENARIOS = 10;
+const BANDIT_EPSILON = 0.1;
+const LOAD_SHARE_EMA_ALPHA = 0.06;
+const DEFAULT_COMMITMENT_PENALTY_WEIGHT = 1.5;
 
 export function createPaymentFlow() {
   const providers = [
@@ -163,12 +165,13 @@ export function createPaymentFlow() {
     { id: "EUR", label: "Euro", trafficShare: 0.26 },
   ];
 
-  const profileSwarms = profiles.map(
-    () => new ProviderRoutingSwarm(providers.length),
+  const profileColonies = profiles.map(
+    () => new ProviderPheromoneColony(providers.length),
   );
-  let profileAllocations = profiles.map(() =>
-    providers.map(() => 1 / providers.length),
-  );
+  // A live exponential moving average of how much real traffic each
+  // provider has actually carried recently — measured from lived outcomes,
+  // never computed from a formula. This is what congestion reacts to.
+  let providerLoadShares = providers.map(() => 1 / providers.length);
   let selectedProfileId = profiles[0].id;
   let selectedCountryId = merchantCountries[0].id;
   let selectedCurrencyId = settlementCurrencies[0].id;
@@ -176,14 +179,13 @@ export function createPaymentFlow() {
   const events = [];
   let nextPaymentId = 1;
   let processing = false;
-  let swarmAnimationId = 0;
 
   const view = createDashboardView({
     providers,
     profiles,
     stats,
     events,
-    getDecision: getSelectedProfileDecision,
+    getRouting: getSelectedProfileRouting,
     getRecoveryCandidate: () =>
       findRecoveryCandidate(
         nextPaymentId,
@@ -194,13 +196,10 @@ export function createPaymentFlow() {
       countryId: selectedCountryId,
       currencyId: selectedCurrencyId,
     }),
-    providerUtility,
     getCommitmentStatus,
     getNaiveComparison,
     setProviderConfig,
   });
-
-  const DEFAULT_COMMITMENT_PENALTY_WEIGHT = 1.5;
 
   function setProviderConfig(providerId, field, value) {
     const provider = getProvider(providerId);
@@ -230,24 +229,34 @@ export function createPaymentFlow() {
     view.render();
   }
 
-  function getBestSingleProvider() {
-    let bestProviderIndex = 0;
-    let bestFitness = -Infinity;
-    for (
-      let providerIndex = 0;
-      providerIndex < providers.length;
-      providerIndex++
-    ) {
-      const allocations = profiles.map(() =>
-        providers.map((_, index) => Number(index === providerIndex)),
-      );
-      const fitness = allocationUtility(allocations, true);
-      if (fitness > bestFitness) {
-        bestFitness = fitness;
-        bestProviderIndex = providerIndex;
+  // The naive baseline a junior dev would actually hardcode: read the
+  // published spec sheet (fee/latency/approval), pick whichever provider
+  // looks best on paper, and never adapt. No live state involved at all.
+  function estimateNominalUtility(provider) {
+    let total = 0;
+    let weightSum = 0;
+    for (const profile of profiles) {
+      for (const country of merchantCountries) {
+        for (const currency of settlementCurrencies) {
+          if (!providerSupports(provider, country.id, currency.id)) continue;
+          const weight =
+            profile.trafficShare * country.trafficShare * currency.trafficShare;
+          total +=
+            weight *
+            providerUtility(provider, 0, profile, country.id, currency.id, true);
+          weightSum += weight;
+        }
       }
     }
-    return providers[bestProviderIndex];
+    return weightSum > 0 ? total / weightSum : -Infinity;
+  }
+
+  function getBestSingleProvider() {
+    return providers.reduce((best, provider) =>
+      estimateNominalUtility(provider) > estimateNominalUtility(best)
+        ? provider
+        : best,
+    );
   }
 
   function getNaiveComparison() {
@@ -263,7 +272,6 @@ export function createPaymentFlow() {
   }
 
   function getCommitmentStatus() {
-    const providerLoadShares = getProviderLoadShares(profileAllocations);
     return providers.map((provider, index) =>
       provider.minVolumeCommitment
         ? {
@@ -302,6 +310,30 @@ export function createPaymentFlow() {
     view.render();
   }
 
+  function eligibilityMask(countryId, currencyId) {
+    return providers.map((provider) =>
+      providerSupports(provider, countryId, currencyId),
+    );
+  }
+
+  const COMMITMENT_WEIGHT_SCALE = 4;
+
+  // A commitment shortfall buys a route more consideration at selection
+  // time — more chances to prove itself and count toward the contract —
+  // but it never touches the trail itself. If the route is genuinely
+  // failing, its raw pheromone keeps collapsing regardless of this
+  // multiplier, so a real outage still wins out over the contract.
+  function getCommitmentWeightMultipliers(loadShares) {
+    return providers.map((provider, index) => {
+      if (!provider.minVolumeCommitment) return 1;
+      const shortfall = Math.max(
+        0,
+        provider.minVolumeCommitment - loadShares[index],
+      );
+      return 1 + shortfall * COMMITMENT_WEIGHT_SCALE;
+    });
+  }
+
   function chooseProvider(
     paymentId,
     profile,
@@ -309,14 +341,6 @@ export function createPaymentFlow() {
     currencyId,
     allowRecoveryProbe = false,
   ) {
-    const swarmDecision = optimizeRoute();
-    const profileIndex = profiles.indexOf(profile);
-    const profileShares = filterEligibleShares(
-      swarmDecision.allocations[profileIndex],
-      countryId,
-      currencyId,
-    );
-    const providerLoadShares = getProviderLoadShares(swarmDecision.allocations);
     const recoveryCandidate = allowRecoveryProbe
       ? findRecoveryCandidate(paymentId, countryId, currencyId)
       : null;
@@ -329,11 +353,19 @@ export function createPaymentFlow() {
       };
     }
 
+    const profileIndex = profiles.indexOf(profile);
+    const mask = eligibilityMask(countryId, currencyId);
+    const multipliers = getCommitmentWeightMultipliers(providerLoadShares);
+    const shares = profileColonies[profileIndex].getShares(mask, multipliers);
+    const eligibleIndexes = providers
+      .map((_, index) => index)
+      .filter((index) => mask[index]);
+
     const draw = Math.random();
-    let cumulativeShare = 0;
-    for (let index = 0; index < providers.length; index++) {
-      cumulativeShare += profileShares[index];
-      if (draw <= cumulativeShare || index === providers.length - 1) {
+    let cumulative = 0;
+    for (const index of eligibleIndexes) {
+      cumulative += shares[index];
+      if (draw <= cumulative) {
         return {
           provider: providers[index],
           isRecoveryProbe: false,
@@ -341,6 +373,12 @@ export function createPaymentFlow() {
         };
       }
     }
+    const lastEligible = eligibleIndexes[eligibleIndexes.length - 1];
+    return {
+      provider: providers[lastEligible],
+      isRecoveryProbe: false,
+      allocationShare: providerLoadShares[lastEligible],
+    };
   }
 
   function findRecoveryCandidate(paymentId, countryId, currencyId) {
@@ -361,23 +399,6 @@ export function createPaymentFlow() {
     return (
       provider.supportedCountries.includes(countryId) &&
       provider.supportedCurrencies.includes(currencyId)
-    );
-  }
-
-  function filterEligibleShares(shares, countryId, currencyId) {
-    const eligibleShares = shares.map((share, index) =>
-      providerSupports(providers[index], countryId, currencyId) ? share : 0,
-    );
-    const total = eligibleShares.reduce((sum, share) => sum + share, 0);
-    if (total > 0) return eligibleShares.map((share) => share / total);
-
-    const eligibleCount = providers.filter((provider) =>
-      providerSupports(provider, countryId, currencyId),
-    ).length;
-    return eligibleShares.map((share, index) =>
-      providerSupports(providers[index], countryId, currencyId)
-        ? 1 / eligibleCount
-        : 0,
     );
   }
 
@@ -442,142 +463,26 @@ export function createPaymentFlow() {
     );
   }
 
-  function getProviderLoadShares(allocations) {
-    const loads = providers.map(() => 0);
-    for (let profileIndex = 0; profileIndex < profiles.length; profileIndex++) {
-      const profile = profiles[profileIndex];
-      for (const country of merchantCountries) {
-        for (const currency of settlementCurrencies) {
-          const weight =
-            profile.trafficShare * country.trafficShare * currency.trafficShare;
-          const shares = filterEligibleShares(
-            allocations[profileIndex],
-            country.id,
-            currency.id,
-          );
-          for (
-            let providerIndex = 0;
-            providerIndex < providers.length;
-            providerIndex++
-          ) {
-            loads[providerIndex] += weight * shares[providerIndex];
-          }
-        }
-      }
-    }
-    return loads;
-  }
-
-  function allocationUtility(value, useBaseModel = false) {
-    const allocations = Array.isArray(value[0])
-      ? value
-      : value.length === providers.length
-        ? profiles.map(() => value)
-        : profiles.map((_, profileIndex) =>
-            value.slice(
-              profileIndex * providers.length,
-              (profileIndex + 1) * providers.length,
-            ),
-          );
-    const providerLoadShares = getProviderLoadShares(allocations);
-
-    let totalUtility = 0;
-    for (let profileIndex = 0; profileIndex < profiles.length; profileIndex++) {
-      const profile = profiles[profileIndex];
-      for (const country of merchantCountries) {
-        for (const currency of settlementCurrencies) {
-          const contextWeight =
-            profile.trafficShare * country.trafficShare * currency.trafficShare;
-          const shares = filterEligibleShares(
-            allocations[profileIndex],
-            country.id,
-            currency.id,
-          );
-          for (
-            let providerIndex = 0;
-            providerIndex < providers.length;
-            providerIndex++
-          ) {
-            const share = shares[providerIndex];
-            if (!share) continue;
-            totalUtility +=
-              contextWeight *
-              share *
-              providerUtility(
-                providers[providerIndex],
-                providerLoadShares[providerIndex],
-                profile,
-                country.id,
-                currency.id,
-                useBaseModel,
-              );
-          }
-        }
-      }
-    }
-
-    for (const provider of providers) {
-      if (!provider.minVolumeCommitment) continue;
-      const providerIndex = providers.indexOf(provider);
-      const shortfall = Math.max(
-        0,
-        provider.minVolumeCommitment - providerLoadShares[providerIndex],
-      );
-      totalUtility -= shortfall * provider.commitmentPenaltyWeight;
-    }
-
-    return totalUtility;
-  }
-
-  function optimizeRoute() {
-    for (let profileIndex = 0; profileIndex < profiles.length; profileIndex++) {
-      const fitness = (shares) => {
-        const candidate = profileAllocations.map((allocation) => [
-          ...allocation,
-        ]);
-        candidate[profileIndex] = shares;
-        return allocationUtility(candidate);
-      };
-      profileAllocations[profileIndex] = [
-        ...profileSwarms[profileIndex].getBest(fitness).shares,
-      ];
-    }
-
-    return {
-      allocations: profileAllocations.map((allocation) => [...allocation]),
-      fitness: allocationUtility(profileAllocations),
-    };
-  }
-
-  function getSelectedProfileDecision() {
-    const decision = optimizeRoute();
+  function getSelectedProfileRouting() {
     const profileIndex = profiles.findIndex(
       (profile) => profile.id === selectedProfileId,
     );
+    const colony = profileColonies[profileIndex];
+    const mask = eligibilityMask(selectedCountryId, selectedCurrencyId);
+    const multipliers = getCommitmentWeightMultipliers(providerLoadShares);
+    const shares = colony.getShares(mask, multipliers);
     return {
-      ...decision,
       profileId: profiles[profileIndex].id,
       profileName: profiles[profileIndex].label,
-      marketLabel: `${selectedCountryId} / ${selectedCurrencyId}`,
-      shares: filterEligibleShares(
-        decision.allocations[profileIndex],
-        selectedCountryId,
-        selectedCurrencyId,
-      ),
-      particles: profileSwarms[profileIndex].particles.map((particle) => ({
-        position: filterEligibleShares(
-          particle.position,
-          selectedCountryId,
-          selectedCurrencyId,
-        ),
-      })),
+      shares,
+      pheromones: [...colony.pheromones],
     };
   }
 
   function setProfile(profileId) {
     if (!profiles.some((profile) => profile.id === profileId)) return;
     selectedProfileId = profileId;
-    view.renderDecision();
+    view.renderRouting();
     view.setMessage(
       `Payment profile: ${profiles.find((profile) => profile.id === profileId).label}`,
     );
@@ -595,7 +500,29 @@ export function createPaymentFlow() {
     view.setMessage(`Merchant route: ${countryId} · ${currencyId}`);
   }
 
-  async function processPayment(forceInitialFailure = false) {
+  // The reinforcement step: exactly one ant's worth of feedback. No search,
+  // no fitness formula — the reward is computed from what actually just
+  // happened, deposited on the route that was actually walked, and every
+  // trail evaporates a little so old information keeps getting refreshed.
+  function reinforceRouting(profile, provider, result) {
+    const providerIndex = providers.indexOf(provider);
+    const feeCost = (result.feeBps / 10000) * profile.feeWeight;
+    const latencyCost = (result.latency / 3500) * profile.latencyWeight;
+    const reward =
+      (result.ok ? 1 : -profile.failurePenalty) - latencyCost - feeCost;
+
+    providerLoadShares = providerLoadShares.map((share, index) =>
+      share +
+      LOAD_SHARE_EMA_ALPHA * ((index === providerIndex ? 1 : 0) - share),
+    );
+
+    const profileIndex = profiles.indexOf(profile);
+    const colony = profileColonies[profileIndex];
+    colony.deposit(providerIndex, reward);
+    colony.evaporate();
+  }
+
+  async function processPayment(forceFailureUntilReroute = false) {
     if (processing) return;
     processing = true;
     view.setBusy(true);
@@ -608,6 +535,13 @@ export function createPaymentFlow() {
     const attemptHistory = [];
     let successfulProvider = null;
     let successfulRecoveryProbe = false;
+    // "Send failed payment" doesn't just fail once — it keeps failing
+    // whichever provider it lands on, so you can watch that route's own
+    // trail actually get cut attempt by attempt, until the colony's next
+    // draw lands on a different provider and gets to succeed or fail for
+    // real. This is what makes the redirect a *consequence* of watching
+    // pheromone drop, not a scripted jump.
+    let strugglingProviderId = null;
 
     for (
       let attemptNumber = 1;
@@ -620,29 +554,34 @@ export function createPaymentFlow() {
         profile,
         selectedCountryId,
         selectedCurrencyId,
-        isInitialAttempt && !forceInitialFailure,
+        isInitialAttempt && !forceFailureUntilReroute,
       );
+      if (isInitialAttempt && forceFailureUntilReroute) {
+        strugglingProviderId = provider.id;
+      }
+      const forceThisAttempt =
+        forceFailureUntilReroute && provider.id === strugglingProviderId;
       const result = await attemptProvider(
         provider,
         paymentId,
         isRecoveryProbe,
-        isInitialAttempt && forceInitialFailure,
+        forceThisAttempt,
         allocationShare,
         profile,
         selectedCountryId,
         selectedCurrencyId,
       );
+      reinforceRouting(profile, provider, result);
       attemptHistory.push(
         `${provider.name} ${result.reason} (${result.latency} ms)`,
       );
       view.render();
       view.setMessage(
         result.ok
-          ? `${provider.name} authorized · updating route fitness`
-          : `${provider.name} failed · swarm recalculating`,
+          ? `${provider.name} authorized · trail reinforced`
+          : `${provider.name} failed · trail left to fade`,
         result.ok ? "success" : "warning",
       );
-      await animateSwarm(SWARM_ANIMATION_FRAMES);
 
       if (result.ok) {
         successfulProvider = provider;
@@ -687,58 +626,6 @@ export function createPaymentFlow() {
     processing = false;
     view.setBusy(false);
     view.render();
-  }
-
-  function animateSwarm(iterations) {
-    return new Promise((resolve) => {
-      const animationId = ++swarmAnimationId;
-      const frameCount =
-        document.hidden ||
-        window.matchMedia("(prefers-reduced-motion: reduce)").matches
-          ? 1
-          : iterations;
-      let frame = 0;
-
-      function advance() {
-        if (animationId !== swarmAnimationId) {
-          resolve();
-          return;
-        }
-
-        stepProfileSwarms();
-        view.renderDecision();
-        frame += 1;
-        if (frame < frameCount) {
-          requestAnimationFrame(advance);
-        } else {
-          resolve();
-        }
-      }
-
-      if (frameCount === 1) {
-        stepProfileSwarms();
-        view.renderDecision();
-        resolve();
-        return;
-      }
-
-      requestAnimationFrame(advance);
-    });
-  }
-
-  function stepProfileSwarms() {
-    for (let profileIndex = 0; profileIndex < profiles.length; profileIndex++) {
-      const fitness = (shares) => {
-        const candidate = profileAllocations.map((allocation) => [
-          ...allocation,
-        ]);
-        candidate[profileIndex] = shares;
-        return allocationUtility(candidate);
-      };
-      profileAllocations[profileIndex] = [
-        ...profileSwarms[profileIndex].step(fitness).shares,
-      ];
-    }
   }
 
   async function attemptProvider(
@@ -821,150 +708,6 @@ export function createPaymentFlow() {
     events.length = Math.min(events.length, 6);
   }
 
-  function runBenchmark() {
-    if (processing) return;
-    view.setBusy(true);
-
-    const baselineTrials = [];
-    const greedyTrials = [];
-    const psoTrials = [];
-    let psoWinsGreedy = 0;
-    let psoWinsSingle = 0;
-
-    for (let scenario = 0; scenario < BENCHMARK_SCENARIOS; scenario++) {
-      const benchmarkSwarms = profiles.map(
-        (_, profileIndex) =>
-          new ProviderRoutingSwarm(
-            providers.length,
-            36,
-            createSeededRandom(
-              8171 + scenario * 104729 + profileIndex * 15485863,
-            ),
-          ),
-      );
-      let psoAllocations = profiles.map(() =>
-        providers.map(() => 1 / providers.length),
-      );
-      let psoFitnessEvaluations = 0;
-      for (let iteration = 0; iteration < 180; iteration++) {
-        for (
-          let profileIndex = 0;
-          profileIndex < profiles.length;
-          profileIndex++
-        ) {
-          const fitness = (shares) => {
-            const candidate = psoAllocations.map((allocation) => [
-              ...allocation,
-            ]);
-            candidate[profileIndex] = shares;
-            psoFitnessEvaluations++;
-            return allocationUtility(candidate, true);
-          };
-          psoAllocations[profileIndex] = [
-            ...benchmarkSwarms[profileIndex].step(fitness).shares,
-          ];
-        }
-      }
-
-      let baselineAllocations = profiles.map(() => providers.map(() => 0));
-      let baselineFitness = -Infinity;
-      let baselineFitnessEvaluations = 0;
-      for (
-        let providerIndex = 0;
-        providerIndex < providers.length;
-        providerIndex++
-      ) {
-        const allocations = profiles.map(() =>
-          providers.map((_, index) => Number(index === providerIndex)),
-        );
-        const candidateFitness = allocationUtility(allocations, true);
-        baselineFitnessEvaluations++;
-        if (candidateFitness > baselineFitness) {
-          baselineFitness = candidateFitness;
-          baselineAllocations = allocations;
-        }
-      }
-
-      const workload = createBenchmarkWorkload(20260926 + scenario * 7919);
-      const greedy = greedyAllocation(100);
-      const baselineResult = simulatePolicy(
-        baselineAllocations,
-        workload,
-        baselineFitnessEvaluations,
-      );
-      const greedyResult = simulatePolicy(
-        greedy.allocations,
-        workload,
-        greedy.fitnessEvaluations,
-      );
-      const psoResult = simulatePolicy(
-        psoAllocations,
-        workload,
-        psoFitnessEvaluations,
-      );
-      baselineTrials.push(baselineResult);
-      greedyTrials.push(greedyResult);
-      psoTrials.push(psoResult);
-      if (psoResult.utility > greedyResult.utility) psoWinsGreedy++;
-      if (psoResult.utility > baselineResult.utility) psoWinsSingle++;
-    }
-
-    view.renderBenchmark({
-      baseline: averagePolicyResults(baselineTrials),
-      greedy: averagePolicyResults(greedyTrials),
-      pso: averagePolicyResults(psoTrials),
-      scenarioCount: BENCHMARK_SCENARIOS,
-      psoWinsGreedy,
-      psoWinsSingle,
-      requestCount: BENCHMARK_REQUESTS * BENCHMARK_SCENARIOS,
-    });
-    view.setBusy(false);
-    view.setMessage(
-      `Benchmark complete · PSO beat greedy in ${psoWinsGreedy}/${BENCHMARK_SCENARIOS} scenarios`,
-    );
-  }
-
-  function greedyAllocation(steps) {
-    const allocations = profiles.map(() =>
-      providers.map(() => 1 / providers.length),
-    );
-    const increment = 1 / steps;
-    let fitnessEvaluations = 1;
-    let currentFitness = allocationUtility(allocations, true);
-
-    for (let move = 0; move < steps * profiles.length; move++) {
-      let bestMove = null;
-      let bestFitness = -Infinity;
-      for (
-        let profileIndex = 0;
-        profileIndex < profiles.length;
-        profileIndex++
-      ) {
-        for (let from = 0; from < providers.length; from++) {
-          if (allocations[profileIndex][from] < increment) continue;
-          for (let to = 0; to < providers.length; to++) {
-            if (from === to) continue;
-            const candidate = allocations.map((allocation) => [...allocation]);
-            candidate[profileIndex][from] -= increment;
-            candidate[profileIndex][to] += increment;
-            const candidateFitness = allocationUtility(candidate, true);
-            fitnessEvaluations++;
-            if (candidateFitness > bestFitness + 1e-10) {
-              bestFitness = candidateFitness;
-              bestMove = { profileIndex, from, to };
-            }
-          }
-        }
-      }
-      if (!bestMove) break;
-      allocations[bestMove.profileIndex][bestMove.from] -= increment;
-      allocations[bestMove.profileIndex][bestMove.to] += increment;
-      currentFitness = bestFitness;
-    }
-
-    return { allocations, fitness: currentFitness, fitnessEvaluations };
-  }
-
   function createSeededRandom(seed) {
     let state = seed >>> 0;
     return () => {
@@ -1003,58 +746,88 @@ export function createPaymentFlow() {
         countryId: country.id,
         currencyId: currency.id,
         routeDraw: random(),
+        epsilonRoll: random(),
+        exploreDraw: random(),
         approvalRolls: providers.map(random),
         latencyFactors: providers.map(() => 0.9 + random() * 0.2),
       };
     });
   }
 
-  function averagePolicyResults(results) {
-    const average = (selector) =>
-      results.reduce((total, result) => total + selector(result), 0) /
-      results.length;
-    return {
-      shares: profiles.map((_, profileIndex) =>
-        providers.map((_, providerIndex) =>
-          average((result) => result.allocations[profileIndex][providerIndex]),
-        ),
-      ),
-      approvalRate: average((result) => result.approvalRate),
-      meanLatency: average((result) => result.meanLatency),
-      meanFeeBps: average((result) => result.meanFeeBps),
-      utility: average((result) => result.utility),
-      fitnessEvaluations: average((result) => result.fitnessEvaluations),
-    };
-  }
+  // Runs the same stream of simulated payments through three online
+  // policies side by side: a naive rule that never adapts, an
+  // epsilon-greedy bandit, and the ant colony. Each makes its own
+  // sequential decisions and updates its own state as it goes — nobody
+  // gets to solve the workload in advance.
+  function simulateOnlinePolicy(workload, kind, random) {
+    const loadShares = providers.map(() => 1 / providers.length);
+    const colonies =
+      kind === "ants"
+        ? profiles.map(() => new ProviderPheromoneColony(providers.length))
+        : null;
+    const banditStats =
+      kind === "bandit"
+        ? profiles.map(() => providers.map(() => ({ meanReward: 0 })))
+        : null;
+    const naiveProvider = kind === "naive" ? getBestSingleProvider() : null;
+    const naiveProviderIndex = naiveProvider
+      ? providers.indexOf(naiveProvider)
+      : -1;
 
-  function simulatePolicy(allocations, workload, fitnessEvaluations) {
     let approvals = 0;
     let latencyTotal = 0;
     let feeTotal = 0;
     let utilityTotal = 0;
-    const providerLoadShares = getProviderLoadShares(allocations);
 
     for (const request of workload) {
-      let cumulativeShare = 0;
-      let providerIndex = providers.length - 1;
       const profile = profiles[request.profileIndex];
-      const profileAllocation = filterEligibleShares(
-        allocations[request.profileIndex],
-        request.countryId,
-        request.currencyId,
-      );
-      for (let index = 0; index < profileAllocation.length; index++) {
-        cumulativeShare += profileAllocation[index];
-        if (request.routeDraw <= cumulativeShare) {
-          providerIndex = index;
-          break;
+      const mask = eligibilityMask(request.countryId, request.currencyId);
+      const eligibleIndexes = providers
+        .map((_, index) => index)
+        .filter((index) => mask[index]);
+
+      let providerIndex;
+      if (kind === "naive") {
+        providerIndex = mask[naiveProviderIndex]
+          ? naiveProviderIndex
+          : eligibleIndexes[
+              Math.floor(request.exploreDraw * eligibleIndexes.length)
+            ];
+      } else if (kind === "bandit") {
+        if (request.epsilonRoll < BANDIT_EPSILON) {
+          providerIndex =
+            eligibleIndexes[
+              Math.floor(request.exploreDraw * eligibleIndexes.length)
+            ];
+        } else {
+          providerIndex = eligibleIndexes.reduce((best, index) =>
+            banditStats[request.profileIndex][index].meanReward >
+            banditStats[request.profileIndex][best].meanReward
+              ? index
+              : best,
+          );
+        }
+      } else {
+        const multipliers = getCommitmentWeightMultipliers(loadShares);
+        const shares = colonies[request.profileIndex].getShares(
+          mask,
+          multipliers,
+        );
+        let cumulative = 0;
+        providerIndex = eligibleIndexes[eligibleIndexes.length - 1];
+        for (const index of eligibleIndexes) {
+          cumulative += shares[index];
+          if (request.routeDraw <= cumulative) {
+            providerIndex = index;
+            break;
+          }
         }
       }
 
       const provider = providers[providerIndex];
       const performance = providerPerformance(
         provider,
-        providerLoadShares[providerIndex],
+        loadShares[providerIndex],
         request.countryId,
         true,
       );
@@ -1068,43 +841,107 @@ export function createPaymentFlow() {
         request.currencyId,
       );
       const feeCost = (feeBps / 10000) * profile.feeWeight;
+      const reward =
+        (approved ? 1 : -profile.failurePenalty) -
+        (latency / 3500) * profile.latencyWeight -
+        feeCost;
 
       approvals += Number(approved);
       latencyTotal += latency;
       feeTotal += feeBps;
-      utilityTotal +=
-        (approved ? 1 : -profile.failurePenalty) -
-        (latency / 3500) * profile.latencyWeight -
-        feeCost;
+      utilityTotal += reward;
+
+      for (let index = 0; index < providers.length; index++) {
+        loadShares[index] +=
+          LOAD_SHARE_EMA_ALPHA * ((index === providerIndex ? 1 : 0) - loadShares[index]);
+      }
+
+      if (kind === "bandit") {
+        const stat = banditStats[request.profileIndex][providerIndex];
+        stat.meanReward += 0.1 * (reward - stat.meanReward);
+      } else if (kind === "ants") {
+        const colony = colonies[request.profileIndex];
+        colony.deposit(providerIndex, reward);
+        colony.evaporate();
+      }
     }
 
     let commitmentPenalty = 0;
     for (const provider of providers) {
       if (!provider.minVolumeCommitment) continue;
-      const providerIndex = providers.indexOf(provider);
+      const index = providers.indexOf(provider);
       const shortfall = Math.max(
         0,
-        provider.minVolumeCommitment - providerLoadShares[providerIndex],
+        provider.minVolumeCommitment - loadShares[index],
       );
       commitmentPenalty += shortfall * provider.commitmentPenaltyWeight;
     }
 
     return {
-      allocations,
+      shares: loadShares,
       approvalRate: approvals / workload.length,
       meanLatency: latencyTotal / workload.length,
       meanFeeBps: feeTotal / workload.length,
       utility: utilityTotal / workload.length - commitmentPenalty,
-      fitnessEvaluations,
     };
+  }
+
+  function averagePolicyResults(results) {
+    const average = (selector) =>
+      results.reduce((total, result) => total + selector(result), 0) /
+      results.length;
+    return {
+      shares: providers.map((_, index) =>
+        average((result) => result.shares[index]),
+      ),
+      approvalRate: average((result) => result.approvalRate),
+      meanLatency: average((result) => result.meanLatency),
+      meanFeeBps: average((result) => result.meanFeeBps),
+      utility: average((result) => result.utility),
+    };
+  }
+
+  function runBenchmark() {
+    if (processing) return;
+    view.setBusy(true);
+
+    const naiveTrials = [];
+    const banditTrials = [];
+    const antTrials = [];
+    let antWinsBandit = 0;
+    let antWinsNaive = 0;
+
+    for (let scenario = 0; scenario < BENCHMARK_SCENARIOS; scenario++) {
+      const workload = createBenchmarkWorkload(20260926 + scenario * 7919);
+      const naiveResult = simulateOnlinePolicy(workload, "naive", null);
+      const banditResult = simulateOnlinePolicy(workload, "bandit", null);
+      const antResult = simulateOnlinePolicy(workload, "ants", null);
+      naiveTrials.push(naiveResult);
+      banditTrials.push(banditResult);
+      antTrials.push(antResult);
+      if (antResult.utility > banditResult.utility) antWinsBandit++;
+      if (antResult.utility > naiveResult.utility) antWinsNaive++;
+    }
+
+    view.renderBenchmark({
+      naive: averagePolicyResults(naiveTrials),
+      bandit: averagePolicyResults(banditTrials),
+      ants: averagePolicyResults(antTrials),
+      scenarioCount: BENCHMARK_SCENARIOS,
+      antWinsBandit,
+      antWinsNaive,
+      requestCount: BENCHMARK_REQUESTS * BENCHMARK_SCENARIOS,
+    });
+    view.setBusy(false);
+    view.setMessage(
+      `Benchmark complete · ants beat the bandit in ${antWinsBandit}/${BENCHMARK_SCENARIOS} scenarios`,
+    );
   }
 
   function reset() {
     if (processing) return false;
-    profileSwarms.forEach((swarm) => swarm.reset());
-    profileAllocations = profiles.map(() =>
-      providers.map(() => 1 / providers.length),
-    );
+    profileColonies.forEach((colony) => colony.reset());
+    providerLoadShares = providers.map(() => 1 / providers.length);
     selectedProfileId = profiles[0].id;
     selectedCountryId = merchantCountries[0].id;
     selectedCurrencyId = settlementCurrencies[0].id;
@@ -1124,13 +961,11 @@ export function createPaymentFlow() {
     view.clearRouteAnimation();
     view.setMessage("Simulation reset");
     view.render();
-    void animateSwarm(SWARM_ANIMATION_FRAMES);
     return true;
   }
 
   function start() {
     view.render();
-    void animateSwarm(SWARM_ANIMATION_FRAMES);
   }
 
   function formatId(paymentId) {
